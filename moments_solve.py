@@ -328,7 +328,7 @@ def solve_m1_dg(
     adapt_max_halvings: int = 6,
     # ---- boundary condition ----
     bc_type: str = "vacuum_marshak",  # "vacuum_zero" or "vacuum_marshak"
-    marshak_beta: float = 0.5,
+    marshak_beta: float = 0.25,   # 3D Marshak: J·n = (1/4)φ at vacuum boundary
 ) -> CoeffField:
     nx, ny = grid.nx, grid.ny
     ncells = nx * ny
@@ -575,16 +575,22 @@ def solve_m1_dg(
             else:
                 raise ValueError(faceR)
 
-            # L block: LL*(Aminus*TL + Aplus*TR)
+            # Consistent interior flux: use left coefficient on UL and right coefficient on UR
+            DR = Dcell[cR]
+            AminusR_n, AplusR_n = build_Bn_and_A(nvec, DR, a)
+            AplusR_n_big = np.kron(AplusR_n, If)
+
+            # L block: LL*(Aminus(DL,n)*TL + Aplus(DR,n)*TR)
             add_block(offL, offL, LL_3 @ (AminusL_big @ TL_3))
-            add_block(offL, offR, LL_3 @ (AplusL_big  @ TR_3))
+            add_block(offL, offR, LL_3 @ (AplusR_n_big @ TR_3))
 
             # R side with outward normal -n
             nR = -nvec
-            DR = Dcell[cR]
             AminusR, AplusR = build_Bn_and_A(nR, DR, a)
             AminusR_big = np.kron(AminusR, If)
-            AplusR_big  = np.kron(AplusR,  If)
+            # cross term for UL must use left coefficient with normal nR
+            AminusL_nR, AplusL_nR = build_Bn_and_A(nR, DL, a)
+            AplusL_nR_big = np.kron(AplusL_nR, If)
 
             # Choose lift for R face
             if faceR == 'x-':
@@ -598,9 +604,9 @@ def solve_m1_dg(
             else:
                 raise ValueError(faceR)
 
-            # R block: LR*(Aminus*TR + Aplus*TL)
+            # R block: LR*(Aminus(DR,-n)*TR + Aplus(DL,-n)*TL)
             add_block(offR, offR, LR_3 @ (AminusR_big @ TR_3))
-            add_block(offR, offL, LR_3 @ (AplusR_big  @ TL_3))
+            add_block(offR, offL, LR_3 @ (AplusL_nR_big @ TL_3))
 
         # Loop over all faces once (vertical + horizontal)
         for iy in range(ny):
@@ -670,16 +676,24 @@ def solve_m1_dg(
                     phi[c], Jx[c], Jy[c], phi_floor=phi_floor, delta=realiz_delta
                 )
 
-        # compute update norm
-        diff = np.linalg.norm(U - U_prev) / (np.linalg.norm(U_prev) + 1e-30)
+        # Repack filtered/projected fields so the Picard state, closure state, and convergence test agree
+        U_post = np.zeros_like(U)
+        for c in range(ncells):
+            base = c * (3 * Nloc)
+            U_post[base:base+Nloc] = phi[c]
+            U_post[base+Nloc:base+2*Nloc] = Jx[c]
+            U_post[base+2*Nloc:base+3*Nloc] = Jy[c]
+
+        diff = np.linalg.norm(U_post - U_prev) / (np.linalg.norm(U_prev) + 1e-30)
         if verbose:
             extra = " (adaptive relax)" if adaptive_relax else ""
             print(f"[Picard {it+1:02d}] rel_change={diff:.3e}{extra}")
 
         if diff < tol:
+            U_prev = U_post.copy()
             break
 
-        U_prev = U.copy()
+        U_prev = U_post.copy()
         diff_prev = diff
 
     return CoeffField(phi=phi, Jx=Jx, Jy=Jy)
@@ -730,14 +744,14 @@ if __name__ == "__main__":
         modal_alpha=18.0,
         modal_s=8,
         # --- Picard controls ---
-        max_picard=20,          #Tune max_picard
+        max_picard=40,          #Tune max_picard
         relax=1.0,
         adaptive_relax=False,
         tol=1e-5,
         verbose=True,
         # --- boundary condition ---
         bc_type="vacuum_marshak",
-        marshak_beta=0.5,
+        marshak_beta=0.25,   # 3D Marshak: J·n = (1/4)φ
     )
 
     # Access cell-average (mode 0,0) solutions
@@ -757,7 +771,9 @@ if __name__ == "__main__":
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
 
-    im0 = axes[0].imshow(np.log(np.maximum(phi_img, 1e-6)), origin="lower", extent=extent, aspect="auto")
+    import matplotlib.colors as mcolors
+    im0 = axes[0].imshow(np.maximum(phi_img, 1e-6), origin="lower", extent=extent, aspect="auto",
+                         norm=mcolors.LogNorm())
     axes[0].set_title("Cell-avg ϕ")
     axes[0].set_xlabel("x")
     axes[0].set_ylabel("y")
