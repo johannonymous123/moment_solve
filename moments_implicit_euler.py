@@ -346,6 +346,9 @@ def solve_m1_dg_timestep(
     modal_s: int = 8,
     adaptive_relax: bool = True,
     adapt_max_halvings: int = 6,
+    # ---- stall / limit-cycle detection ----
+    stall_tol: float = 0.0,       # if >0, stop when rel_change stays below this for stall_window iters
+    stall_window: int = 10,
     # ---- boundary condition ----
     bc_type: str = "vacuum_marshak",  # "vacuum_zero" or "vacuum_marshak"
     marshak_beta: float = 0.25,   # 3D Marshak: J·n = (1/4)φ at vacuum boundary
@@ -437,6 +440,7 @@ def solve_m1_dg_timestep(
         U_prev[base+2*Nloc:base+3*Nloc] = Jy[c]
 
     diff_prev = np.inf
+    diff_history: list[float] = []
 
     for it in range(max_picard):
         # Compute D per cell from previous iterate averages
@@ -724,8 +728,21 @@ def solve_m1_dg_timestep(
             print(f"[Picard {it+1:02d}] rel_change={diff:.3e}{extra}")
 
         if diff < tol:
+            if verbose:
+                print(f"  -> converged at iteration {it+1}")
             U_prev = U_post.copy()
             break
+
+        # Limit-cycle / stall detection
+        diff_history.append(diff)
+        if stall_tol > 0.0 and len(diff_history) >= stall_window:
+            window = diff_history[-stall_window:]
+            if max(window) < stall_tol:
+                if verbose:
+                    print(f"  -> stall detected: rel_change < {stall_tol:.1e} "
+                          f"for {stall_window} iters, accepting solution")
+                U_prev = U_post.copy()
+                break
 
         U_prev = U_post.copy()
         diff_prev = diff
@@ -819,31 +836,94 @@ if __name__ == "__main__":
     import matplotlib.colors as mcolors
 
     # ------------------------------------------------------------------
-    # Domain and grid
+    # Choose geometry: "lattice", "crossing_beams", or "Hohlraum_v2"
     # ------------------------------------------------------------------
-    grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)   # Tune nx, ny
+    GEOMETRY = "crossing_beams"   # <-- switch here
 
-    # ------------------------------------------------------------------
-    # Time parameters
-    # ------------------------------------------------------------------
-    c   = 1.0    # speed of light
-    T_f = 3.5    # final time         — Tune
-    N_t = 10    # number of steps    — Tune
-    dt  = T_f / N_t
+    if GEOMETRY == "lattice":
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
 
-    # ------------------------------------------------------------------
-    # Material / source hooks  (time-independent for now)
-    # ------------------------------------------------------------------
-    def Q(x, y):
-        return 1.0 if (3 < x < 4) and (3 < y < 4) else 0.0
+        def Q(x, y):
+            return 1.0 if (3 < x < 4) and (3 < y < 4) else 0.0
 
-    def sigma_a(x, y):
-        s = np.floor(x) * 10 + np.floor(y)
-        return 10.0 if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55] else 0.0
+        def sigma_a(x, y):
+            s = np.floor(x) * 10 + np.floor(y)
+            return 10.0 if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55] else 0.0
 
-    def sigma_s(x, y):
-        s = np.floor(x) * 10 + np.floor(y)
-        return 0.0 if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55] else 1.0
+        def sigma_s(x, y):
+            s = np.floor(x) * 10 + np.floor(y)
+            return 0.0 if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55] else 1.0
+
+        c   = 1.0
+        T_f = 3.5
+        N_t = 10
+
+    elif GEOMETRY == "crossing_beams":
+        # Two narrow source strips on perpendicular sides of a low-absorption box.
+        # Domain [0,7]x[0,7], absorbing frame (width 0.5) with sigma_a=10.
+        # Beam A: vertical strip near left wall, x in [0.5,1.0], y in [2.5,4.5]
+        # Beam B: horizontal strip near bottom wall, x in [2.5,4.5], y in [0.5,1.0]
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
+
+        def Q(x, y):
+            beam_a = (0.5 < x < 1.0) and (2.5 < y < 4.5)
+            beam_b = (2.5 < x < 4.5) and (0.5 < y < 1.0)
+            return 1.0 if (beam_a or beam_b) else 0.0
+
+        def sigma_a(x, y):
+            if x < 0.5 or x > 6.5 or y < 0.5 or y > 6.5:
+                return 10.0   # absorbing frame
+            return 0.02
+
+        def sigma_s(x, y):
+            return 0.0
+
+        c   = 1.0
+        T_f = 3.5
+        N_t = 10
+
+    else:  # Hohlraum_v2: 1.5x1.5 domain, all interior features shifted +0.2x +0.1y
+        grid = Grid(x0=0.0, x1=1.5, y0=0.0, y1=1.5, nx=75, ny=75)
+
+        def Q(x, y):
+            # Volumetric isotropic source strip (proxy for the original boundary source)
+            return 1.0 if (0.10 < x < 0.15) and (0.10 < y < 1.40) else 0.0
+
+        def sigma_a(x, y):
+            # 4-sided absorbing boundary shell (thickness 0.05)
+            if x < 0.05 or x > 1.45 or y < 0.05 or y > 1.45:
+                return 100.0
+            # shifted left obstruction
+            if 0.20 < x < 0.25 and 0.35 < y < 1.15:
+                return 5.0
+            # shifted inner core
+            if 0.70 < x < 1.05 and 0.40 < y < 1.10:
+                return 50.0
+            # shifted inner shell
+            if 0.65 < x < 1.05 and 0.35 < y < 1.15:
+                return 10.0
+            return 1.0
+
+        def sigma_s(x, y):
+            # 4-sided absorbing boundary shell (no scattering)
+            if x < 0.05 or x > 1.45 or y < 0.05 or y > 1.45:
+                return 0.0
+            # shifted left obstruction
+            if 0.20 < x < 0.25 and 0.35 < y < 1.15:
+                return 95.0
+            # shifted inner core
+            if 0.70 < x < 1.05 and 0.40 < y < 1.10:
+                return 50.0
+            # shifted inner shell
+            if 0.65 < x < 1.05 and 0.35 < y < 1.15:
+                return 90.0
+            return 0.1
+
+        c   = 1.0
+        T_f = 2.0
+        N_t = 20
+
+    dt = T_f / N_t
 
     # ------------------------------------------------------------------
     # Run implicit-Euler time integration
@@ -871,10 +951,13 @@ if __name__ == "__main__":
         modal_alpha=18.0,
         modal_s=8,
         # --- Picard controls ---
-        max_picard=40,         # Tune
-        relax=1.0,
-        adaptive_relax=False,
+        max_picard=60,         # Tune
+        relax=0.3,
+        adaptive_relax=True,
+        adapt_max_halvings=10,
         tol=1e-5,
+        stall_tol=1e-2,
+        stall_window=10,
         verbose=True,
         # --- boundary condition ---
         bc_type="vacuum_marshak",
@@ -897,12 +980,12 @@ if __name__ == "__main__":
 
     im0 = axes[0].imshow(np.maximum(phi_avg, 1e-10), origin="lower", extent=extent,
                          aspect="auto", norm=mcolors.LogNorm())
-    axes[0].set_title(f"Cell-avg ϕ  (t = {T_f:.2f})")
+    axes[0].set_title(f"Cell-avg ϕ  (t = {T_f:.2f})  [{GEOMETRY}]")
     axes[0].set_xlabel("x");  axes[0].set_ylabel("y")
     fig.colorbar(im0, ax=axes[0])
 
     im1 = axes[1].imshow(Jmag_img, origin="lower", extent=extent, aspect="auto")
-    axes[1].set_title(f"Cell-avg |J|  (t = {T_f:.2f})")
+    axes[1].set_title(f"Cell-avg |J|  (t = {T_f:.2f})  [{GEOMETRY}]")
     axes[1].set_xlabel("x");  axes[1].set_ylabel("y")
     fig.colorbar(im1, ax=axes[1])
 
@@ -919,6 +1002,6 @@ if __name__ == "__main__":
     fig, ax = plt.subplots(figsize=(8, 4))
     ax.plot(t_values, phi_int, marker="o", ms=4)
     ax.set_xlabel("t");  ax.set_ylabel("∫ φ dA")
-    ax.set_title("Domain-integrated flux vs. time  (implicit Euler M1-DG)")
+    ax.set_title(f"Domain-integrated flux vs. time  [{GEOMETRY}]  (implicit Euler M1-DG)")
     ax.grid(True)
     plt.tight_layout();  plt.show()

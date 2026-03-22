@@ -329,6 +329,11 @@ def solve_m1_dg(
     # ---- boundary condition ----
     bc_type: str = "vacuum_marshak",  # "vacuum_zero" or "vacuum_marshak"
     marshak_beta: float = 0.25,   # 3D Marshak: J·n = (1/4)φ at vacuum boundary
+    # ---- warm-start from previous solution ----
+    init_coeffs: Optional[CoeffField] = None,  # if given, use mode-0 averages as initial guess
+    # ---- limit-cycle detection ----
+    stall_tol: float = 0.0,       # if >0, stop when rel_change stays below this for stall_window iters
+    stall_window: int = 10,
 ) -> CoeffField:
     nx, ny = grid.nx, grid.ny
     ncells = nx * ny
@@ -350,14 +355,21 @@ def solve_m1_dg(
     Jx = np.zeros((ncells, Nloc))
     Jy = np.zeros((ncells, Nloc))
 
-    # crude initial guess: phi00 = Q/sigma_a (if sigma_a>0)
-    for iy in range(ny):
-        for ix in range(nx):
-            cid = cell_id(ix, iy, nx)
-            xc, yc = grid.cell_center(ix, iy)
-            sa = float(sigma_a_cell(xc, yc))
-            Qv = float(Q_cell(xc, yc))
-            phi[cid, 0] = Qv / sa if sa > 1e-14 else 0.0
+    if init_coeffs is not None:
+        # Warm-start: copy mode-0 (cell averages) from a prior solution
+        for c in range(ncells):
+            phi[c, 0] = init_coeffs.phi[c, 0]
+            Jx[c, 0]  = init_coeffs.Jx[c, 0]
+            Jy[c, 0]  = init_coeffs.Jy[c, 0]
+    else:
+        # crude initial guess: phi00 = Q/sigma_a (if sigma_a>0)
+        for iy in range(ny):
+            for ix in range(nx):
+                cid = cell_id(ix, iy, nx)
+                xc, yc = grid.cell_center(ix, iy)
+                sa = float(sigma_a_cell(xc, yc))
+                Qv = float(Q_cell(xc, yc))
+                phi[cid, 0] = Qv / sa if sa > 1e-14 else 0.0
 
     if enforce_realizability:
         for c in range(ncells):
@@ -407,6 +419,7 @@ def solve_m1_dg(
         U_prev[base+2*Nloc:base+3*Nloc] = Jy[c]
 
     diff_prev = np.inf
+    diff_history: list[float] = []
 
     for it in range(max_picard):
         # Compute D per cell from previous iterate averages
@@ -690,8 +703,21 @@ def solve_m1_dg(
             print(f"[Picard {it+1:02d}] rel_change={diff:.3e}{extra}")
 
         if diff < tol:
+            if verbose:
+                print(f"  -> converged at iteration {it+1}")
             U_prev = U_post.copy()
             break
+
+        # Limit-cycle / stall detection
+        diff_history.append(diff)
+        if stall_tol > 0.0 and len(diff_history) >= stall_window:
+            window = diff_history[-stall_window:]
+            if max(window) < stall_tol:
+                if verbose:
+                    print(f"  -> stall detected: rel_change < {stall_tol:.1e} "
+                          f"for {stall_window} iters, accepting solution")
+                U_prev = U_post.copy()
+                break
 
         U_prev = U_post.copy()
         diff_prev = diff
@@ -703,56 +729,129 @@ def solve_m1_dg(
 # ============================================================
 
 if __name__ == "__main__":
-    # Domain and grid
-    grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)     #Tune nx,ny
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
 
-    # Cellwise-constant user hooks (kept structure)
-    def Q(x, y):
-        # return 1.0
-        return 1.0 if (3 < x < 4) and (3 < y < 4) else 0  # localized source
+    # ------------------------------------------------------------------
+    # Choose geometry: "lattice", "crossing_beams", or "Hohlraum_v2"
+    # ------------------------------------------------------------------
+    GEOMETRY = "crossing_beams"   # <-- switch here
 
-    def sigma_a(x, y):
-        s = np.floor(x) * 10 + np.floor(y)
-        if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55]:
-            return 10.0
-        else:
-            return 0
+    if GEOMETRY == "lattice":
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
 
-    def sigma_s(x, y):
-        s = np.floor(x) * 10 + np.floor(y)
-        if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55]:
-            return 0
-        else:
+        def Q(x, y):
+            return 1.0 if (3 < x < 4) and (3 < y < 4) else 0.0
+
+        def sigma_a(x, y):
+            s = np.floor(x) * 10 + np.floor(y)
+            return 10.0 if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55] else 0.0
+
+        def sigma_s(x, y):
+            s = np.floor(x) * 10 + np.floor(y)
+            return 0.0 if s in [11, 13, 15, 22, 24, 31, 42, 44, 51, 53, 55] else 1.0
+
+    elif GEOMETRY == "crossing_beams":
+        # Two narrow source strips on perpendicular sides of a low-absorption box.
+        # Domain [0,7]x[0,7], uniform sigma_a=0.02, sigma_s=0.
+        # Beam A: vertical strip near left wall, x in [0.5,1.0], y in [2.5,4.5] -> emits rightward
+        # Beam B: horizontal strip near bottom wall, x in [2.5,4.5], y in [0.5,1.0] -> emits upward
+        # Beams cross around (3.0-3.5, 3.0-3.5).
+        # Low absorption everywhere => densities near boundaries are negligible.
+        # M1/Levermore cannot represent the bimodal angular distribution at the crossing.
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
+
+        def Q(x, y):
+            # Two source strips
+            beam_a = (0.5 < x < 1.0) and (2.5 < y < 4.5)  # left-side vertical strip
+            beam_b = (2.5 < x < 4.5) and (0.5 < y < 1.0)  # bottom-side horizontal strip
+            return 1.0 if (beam_a or beam_b) else 0.0
+
+        def sigma_a(x, y):
+            if x < 0.5 or x > 6.5 or y < 0.5 or y > 6.5:
+                return 10.0   # absorbing frame
+            return 0.02
+
+        def sigma_s(x, y):
+            return 0.0
+
+    else:  # Hohlraum_v2: 1.5x1.5 domain, all interior features shifted +0.2x +0.1y
+        grid = Grid(x0=0.0, x1=1.5, y0=0.0, y1=1.5, nx=75, ny=75)
+
+        def Q(x, y):
+            # Volumetric isotropic source strip (proxy for the original boundary source)
+            return 1.0 if (0.2 < x < 0.4) and (0.30 < y < 1.20) else 0.0
+
+        def sigma_a(x, y):
+            # 4-sided absorbing boundary shell (thickness 0.05)
+            if x < 0.1 or x > 1.4 or y < 0.1 or y > 1.4:
+                return 1.0
+            # shifted left obstruction
+            if 0.20 < x < 0.25 and 0.35 < y < 1.15:
+                return 1.0
+            # shifted inner core
+            if 0.70 < x < 1.05 and 0.40 < y < 1.10:
+                return 5.0
+            # shifted inner shell
+            if 0.65 < x < 1.05 and 0.35 < y < 1.15:
+                return 5.0
             return 1.0
 
-    sol = solve_m1_dg(
+        def sigma_s(x, y):
+            # 4-sided absorbing boundary shell (no scattering)
+            if x < 0.1 or x > 1.4 or y < 0.1 or y > 1.4:
+                return 0.0
+            # shifted left obstruction
+            if 0.20 < x < 0.25 and 0.35 < y < 1.15:
+                return 1.0
+            # shifted inner core
+            if 0.70 < x < 1.05 and 0.40 < y < 1.10:
+                return 5.0
+            # shifted inner shell
+            if 0.65 < x < 1.05 and 0.35 < y < 1.15:
+                return 5.0
+            return 1
+
+    PX, PY = 0, 0   # target polynomial degree
+
+    # ------------------------------------------------------------------
+    # p-continuation: converge px=0 first, then warm-start higher orders
+    # ------------------------------------------------------------------
+    common = dict(
         grid=grid,
-        px=0, py=0,      #Tune px,py
         Q_cell=Q,
         sigma_a_cell=sigma_a,
         sigma_s_cell=sigma_s,
         D_func=D_from_phiJ_levermore,
-        # --- stability knobs ---
         use_face_speed=True,
         amin_face=1e-3,
         enforce_realizability=True,
         phi_floor=1e-12,
         realiz_delta=1e-10,
         stabilize_D_tensor=False,
-        # --- higher-order stabilization ---
         use_modal_filter=True,
         modal_alpha=18.0,
         modal_s=8,
-        # --- Picard controls ---
-        max_picard=40,          #Tune max_picard
-        relax=1.0,
-        adaptive_relax=False,
-        tol=1e-5,
         verbose=True,
-        # --- boundary condition ---
         bc_type="vacuum_marshak",
-        marshak_beta=0.25,   # 3D Marshak: J·n = (1/4)φ
+        marshak_beta=0.25,
     )
+
+    if PX == 0 and PY == 0:
+        sol = solve_m1_dg(px=0, py=0, max_picard=80, relax=0.3,
+                          adaptive_relax=True, adapt_max_halvings=10,
+                          tol=1e-5, **common)
+    else:
+        # Step 1: converge px=0
+        print("--- p-continuation: solving px=0 warm-up ---")
+        sol0 = solve_m1_dg(px=0, py=0, max_picard=80, relax=0.3,
+                           adaptive_relax=True, adapt_max_halvings=10,
+                           tol=1e-6, **common)
+        # Step 2: warm-start target order from px=0 averages
+        print(f"\n--- p-continuation: solving px={PX},py={PY} from px=0 ---")
+        sol = solve_m1_dg(px=PX, py=PY, max_picard=120, relax=0.3,
+                          adaptive_relax=True, adapt_max_halvings=10, tol=1e-5,
+                          init_coeffs=sol0, **common)
 
     # Access cell-average (mode 0,0) solutions
     phi_avg = sol.phi[:, 0]
@@ -768,7 +867,6 @@ if __name__ == "__main__":
     Jmag_img = np.sqrt(Jx_avg**2 + Jy_avg**2).reshape((ny, nx))
 
     extent = [grid.x0, grid.x1, grid.y0, grid.y1]
-
     fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
 
     import matplotlib.colors as mcolors

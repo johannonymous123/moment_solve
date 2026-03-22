@@ -97,7 +97,7 @@ def sigma_lattice(x: float, y: float) -> tuple[float, float]:
 
 
 def sigma_hohlraum(x: float, y: float) -> tuple[float, float]:
-    """Returns (sigma_a, sigma_s) for the Hohlraum geometry."""
+    """Returns (sigma_a, sigma_s) for the Hohlraum geometry (original 1.3x1.3 domain)."""
     if x > 1.25:
         return 100.0, 0.0
     if y < 0.05 or y > 1.25:
@@ -111,11 +111,57 @@ def sigma_hohlraum(x: float, y: float) -> tuple[float, float]:
     return 1.0, 0.1
 
 
+def sigma_hohlraum_v2(x: float, y: float) -> tuple[float, float]:
+    """
+    Returns (sigma_a, sigma_s) for the extended Hohlraum geometry on a 1.5x1.5 domain.
+
+    Changes vs. the original:
+      - Domain is [0, 1.5] x [0, 1.5].
+      - Absorbing boundary shell (sigma_a=100) of thickness 0.05 on ALL 4 sides.
+      - All interior features shifted by +0.2 in x and +0.1 in y:
+          left obstruction  : 0.20 < x < 0.25,  0.35 < y < 1.15
+          inner shell       : 0.65 < x < 1.05,  0.35 < y < 1.15
+          inner core        : 0.70 < x < 1.05,  0.40 < y < 1.10
+      - Source is volumetric isotropic strip at 0.10 < x < 0.15, 0.10 < y < 1.40.
+    """
+    if x < 0.05 or x > 1.45:
+        return 100.0, 0.0
+    if y < 0.05 or y > 1.45:
+        return 100.0, 0.0
+    if 0.20 < x < 0.25 and 0.35 < y < 1.15:
+        return 5.0, 95.0
+    if 0.70 < x < 1.05 and 0.40 < y < 1.10:
+        return 50.0, 50.0
+    if 0.65 < x < 1.05 and 0.35 < y < 1.15:
+        return 10.0, 90.0
+    return 1.0, 0.1
+
+
+def sigma_crossing_beams(x: float, y: float) -> tuple[float, float]:
+    """
+    Returns (sigma_a, sigma_s) for the crossing-beams geometry.
+
+    Domain [0,7]x[0,7].  Two narrow source strips (handled in sampler).
+    Absorbing frame (width 0.5) around boundary to kill leakage;
+    uniform sigma_a=0.02, sigma_s=0 in the interior.
+    """
+    if x < 0.5 or x > 6.5 or y < 0.5 or y > 6.5:
+        return 10.0, 0.0   # absorbing frame
+    return 0.02, 0.0
+
+
 def assign_materials_cartesian(cell_centers: np.ndarray, geometry: str):
     Nc = cell_centers.shape[0]
     sigma_a = np.empty(Nc, dtype=np.float64)
     sigma_s = np.empty(Nc, dtype=np.float64)
-    mat_fn = sigma_lattice if geometry == "lattice" else sigma_hohlraum
+    if geometry == "lattice":
+        mat_fn = sigma_lattice
+    elif geometry == "crossing_beams":
+        mat_fn = sigma_crossing_beams
+    elif geometry == "Hohlraum_v2":
+        mat_fn = sigma_hohlraum_v2
+    else:
+        mat_fn = sigma_hohlraum
     for c in range(Nc):
         sigma_a[c], sigma_s[c] = mat_fn(cell_centers[c, 0], cell_centers[c, 1])
     return sigma_a, sigma_s
@@ -139,6 +185,27 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str,
         sinth   = np.sqrt(1.0 - costh**2)
         u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
         w = T_f*1.0
+    elif geometry == "Hohlraum_v2":
+        # Volumetric isotropic source in strip [0.10, 0.15] x [0.10, 1.40]
+        x = np.array([rng.uniform(0.10, 0.15), rng.uniform(0.10, 1.40)], dtype=np.float64)
+        costh   = rng.uniform(-1.0, 1.0)
+        sinth   = np.sqrt(1.0 - costh**2)
+        phi_ang = rng.uniform(0.0, TWO_PI)
+        u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
+        w = T_f * 1.0
+    elif geometry == "crossing_beams":
+        # Two volumetric isotropic source strips with equal area (=1.0 each):
+        #   Beam A: x in [0.5,1.0], y in [2.5,4.5]  (area 1.0)
+        #   Beam B: x in [2.5,4.5], y in [0.5,1.0]  (area 1.0)
+        if rng.uniform(0.0, 1.0) < 0.5:
+            x = np.array([rng.uniform(0.5, 1.0), rng.uniform(2.5, 4.5)], dtype=np.float64)
+        else:
+            x = np.array([rng.uniform(2.5, 4.5), rng.uniform(0.5, 1.0)], dtype=np.float64)
+        costh   = rng.uniform(-1.0, 1.0)
+        sinth   = np.sqrt(1.0 - costh**2)
+        phi_ang = rng.uniform(0.0, TWO_PI)
+        u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
+        w = T_f * 1.0
     else:
         y_min, y_max = 0.0, 1.3
         x   = np.array([1e-8, rng.uniform(y_min, y_max)], dtype=np.float64)
@@ -573,16 +640,20 @@ def main():
     # ------------------------------------------------------------------
     # Choose geometry
     # ------------------------------------------------------------------
-    Lattice = True
+    Lattice = False
 
     if Lattice:
         geometry = "lattice"
         Lx, Ly   = 7.0, 7.0
         Nx, Ny   = 70, 70
+    elif True:   # crossing_beams
+        geometry = "crossing_beams"
+        Lx, Ly   = 7.0, 7.0
+        Nx, Ny   = 70, 70
     else:
-        geometry = "Hohlraum"
-        Lx, Ly   = 1.3, 1.3
-        Nx, Ny   = 130, 130
+        geometry = "Hohlraum_v2"
+        Lx, Ly   = 1.5, 1.5
+        Nx, Ny   = 75, 75
 
     # ------------------------------------------------------------------
     # Time parameters
