@@ -208,17 +208,18 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str):
         w = 1.0
     elif geometry == "Hohlraum_v2":
         # Volumetric isotropic source in strip [0.10, 0.15] x [0.10, 1.40]
+        # Area = 0.05 * 1.30 = 0.065, Q = 1.0 => weight = Q * A_src = 0.065
         x = np.array([rng.uniform(0.10, 0.15), rng.uniform(0.10, 1.40)], dtype=np.float64)
         costh = rng.uniform(-1.0, 1.0)
         sinth = np.sqrt(1.0 - costh**2)
         phi   = rng.uniform(0.0, TWO_PI)
         u = np.array([sinth * np.cos(phi), sinth * np.sin(phi)], dtype=np.float64)
-        w = 1.0
+        w = 0.065
     elif geometry == "crossing_beams":
         # Two volumetric isotropic source strips with equal area (=1.0 each):
         #   Beam A: x in [0.5,1.0], y in [2.5,4.5]  (area 1.0)
         #   Beam B: x in [2.5,4.5], y in [0.5,1.0]  (area 1.0)
-        # Pick a beam uniformly at random; weight = total_area / Np normalised later.
+        # Total source area = 2.0, Q = 1.0 => weight = Q * A_src = 2.0
         if rng.uniform(0.0, 1.0) < 0.5:
             x = np.array([rng.uniform(0.5, 1.0), rng.uniform(2.5, 4.5)], dtype=np.float64)
         else:
@@ -227,7 +228,7 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str):
         sinth = np.sqrt(1.0 - costh**2)
         phi   = rng.uniform(0.0, TWO_PI)
         u = np.array([sinth * np.cos(phi), sinth * np.sin(phi)], dtype=np.float64)
-        w = 1.0
+        w = 2.0
     else:
         y_min, y_max = 0.0, 1.3
         x = np.array([1e-8, rng.uniform(y_min, y_max)], dtype=np.float64)

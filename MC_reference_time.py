@@ -187,16 +187,18 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str,
         w = T_f*1.0
     elif geometry == "Hohlraum_v2":
         # Volumetric isotropic source in strip [0.10, 0.15] x [0.10, 1.40]
+        # Area = 0.05 * 1.30 = 0.065, Q = 1.0 => weight = Q * A_src * T_f
         x = np.array([rng.uniform(0.10, 0.15), rng.uniform(0.10, 1.40)], dtype=np.float64)
         costh   = rng.uniform(-1.0, 1.0)
         sinth   = np.sqrt(1.0 - costh**2)
         phi_ang = rng.uniform(0.0, TWO_PI)
         u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
-        w = T_f * 1.0
+        w = T_f * 0.065
     elif geometry == "crossing_beams":
         # Two volumetric isotropic source strips with equal area (=1.0 each):
         #   Beam A: x in [0.5,1.0], y in [2.5,4.5]  (area 1.0)
         #   Beam B: x in [2.5,4.5], y in [0.5,1.0]  (area 1.0)
+        # Total source area = 2.0, Q = 1.0 => weight = Q * A_src * T_f = 2.0 * T_f
         if rng.uniform(0.0, 1.0) < 0.5:
             x = np.array([rng.uniform(0.5, 1.0), rng.uniform(2.5, 4.5)], dtype=np.float64)
         else:
@@ -205,7 +207,7 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str,
         sinth   = np.sqrt(1.0 - costh**2)
         phi_ang = rng.uniform(0.0, TWO_PI)
         u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
-        w = T_f * 1.0
+        w = T_f * 2.0
     else:
         y_min, y_max = 0.0, 1.3
         x   = np.array([1e-8, rng.uniform(y_min, y_max)], dtype=np.float64)
@@ -640,13 +642,13 @@ def main():
     # ------------------------------------------------------------------
     # Choose geometry
     # ------------------------------------------------------------------
-    Lattice = False
-
-    if Lattice:
+    
+    geometry = "crossing_beams"
+    if geometry == "lattice":
         geometry = "lattice"
         Lx, Ly   = 7.0, 7.0
         Nx, Ny   = 70, 70
-    elif True:   # crossing_beams
+    elif geometry == "crossing_beams":
         geometry = "crossing_beams"
         Lx, Ly   = 7.0, 7.0
         Nx, Ny   = 70, 70
@@ -659,7 +661,7 @@ def main():
     # Time parameters
     # ------------------------------------------------------------------
     c   = 1.0       # speed of light (change units here)
-    T_f = 2.5       # final time
+    T_f = 3.5       # final time
     N_t = 10        # number of time steps
     dt  = T_f / N_t
 
@@ -679,10 +681,10 @@ def main():
     # ------------------------------------------------------------------
     # MC parameters
     # ------------------------------------------------------------------
-    Np                 = 5000
+    Np                 = 50000
     w_cut              = 1e-6 / Np
     w_survive          = 1e-2
-    max_cell_crossings = 100_000   # per particle (not Np*1000 — time kills them)
+    max_cell_crossings = 10000000   # per particle (not Np*1000 — time kills them)
 
     # ------------------------------------------------------------------
     # Initialise particles (birth times sampled uniformly over [0, T_f])
