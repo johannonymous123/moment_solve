@@ -733,9 +733,9 @@ if __name__ == "__main__":
     import matplotlib.colors as mcolors
 
     # ------------------------------------------------------------------
-    # Choose geometry: "lattice", "crossing_beams", or "Hohlraum_v2"
+    # Choose geometry: "lattice", "crossing_beams", "crooked_pipe", or "Hohlraum_v2"
     # ------------------------------------------------------------------
-    GEOMETRY = "crossing_beams"   # <-- switch here
+    GEOMETRY = "crooked_pipe"   # <-- switch here
 
     if GEOMETRY == "lattice":
         grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
@@ -774,6 +774,25 @@ if __name__ == "__main__":
 
         def sigma_s(x, y):
             return 0.0
+
+    elif GEOMETRY == "crooked_pipe":
+        # Scattering cells (sigma_s=1, sigma_a=0) at lattice indices:
+        #   13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55
+        # All others purely absorbing (sigma_a=10, sigma_s=0).
+        # Isotropic source Q=1 in cell 13 (x in [1,2], y in [3,4]).
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
+        _SCATTERING = frozenset([13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55])
+
+        def Q(x, y):
+            return 1.0 if (1.0 < x < 2.0) and (3.0 < y < 4.0) else 0.0
+
+        def sigma_a(x, y):
+            s = int(np.floor(x)) * 10 + int(np.floor(y))
+            return 0.0 if s in _SCATTERING else 10.0
+
+        def sigma_s(x, y):
+            s = int(np.floor(x)) * 10 + int(np.floor(y))
+            return 1.0 if s in _SCATTERING else 0.0
 
     else:  # Hohlraum_v2: 1.5x1.5 domain, all interior features shifted +0.2x +0.1y
         grid = Grid(x0=0.0, x1=1.5, y0=0.0, y1=1.5, nx=75, ny=75)

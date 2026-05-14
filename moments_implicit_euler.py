@@ -766,16 +766,25 @@ def solve_m1_dg_time(
     c: float = 1.0,
     D_func: Callable[[float, np.ndarray], np.ndarray] = D_from_phiJ_levermore,
     verbose_steps: bool = True,
+    # ---- optional initial conditions (None => zero IC) ----
+    phi_ic: Optional[np.ndarray] = None,   # (ncells, Nloc) or None
+    Jx_ic:  Optional[np.ndarray] = None,
+    Jy_ic:  Optional[np.ndarray] = None,
     **kwargs,          # forwarded verbatim to solve_m1_dg_timestep
 ) -> list:
     """
-    Advance the M1 system from t=0 (zero initial data) to t=T_f using
-    N_t uniform implicit-Euler steps of size dt = T_f / N_t.
+    Advance the M1 system from t=0 to t=T_f using N_t uniform implicit-Euler
+    steps of size dt = T_f / N_t.
+
+    Parameters
+    ----------
+    phi_ic, Jx_ic, Jy_ic : ndarray of shape (ncells, Nloc), optional
+        Initial condition at t=0.  If None (default), zero IC is used.
 
     Returns
     -------
     snapshots : list of CoeffField, length N_t + 1
-        snapshots[0]   is the zero initial condition at t = 0.
+        snapshots[0]   is the initial condition at t = 0.
         snapshots[k+1] is the solution at t = (k+1)*dt, for k = 0..N_t-1.
     """
     dt     = T_f / N_t
@@ -784,10 +793,10 @@ def solve_m1_dg_time(
     ncells = grid.nx * grid.ny
     Nloc   = (px + 1) * (py + 1)
 
-    # Zero initial condition
-    phi_prev = np.zeros((ncells, Nloc))
-    Jx_prev  = np.zeros((ncells, Nloc))
-    Jy_prev  = np.zeros((ncells, Nloc))
+    # Initial condition (default: zero)
+    phi_prev = phi_ic.copy() if phi_ic is not None else np.zeros((ncells, Nloc))
+    Jx_prev  = Jx_ic.copy()  if Jx_ic  is not None else np.zeros((ncells, Nloc))
+    Jy_prev  = Jy_ic.copy()  if Jy_ic  is not None else np.zeros((ncells, Nloc))
 
     # Store t=0 snapshot (zero initial data)
     snapshots = [CoeffField(phi=phi_prev.copy(), Jx=Jx_prev.copy(), Jy=Jy_prev.copy())]
@@ -836,9 +845,9 @@ if __name__ == "__main__":
     import matplotlib.colors as mcolors
 
     # ------------------------------------------------------------------
-    # Choose geometry: "lattice", "crossing_beams", or "Hohlraum_v2"
+    # Choose geometry: "lattice", "crossing_beams", "crooked_pipe", "half_plane_beam", or "Hohlraum_v2"
     # ------------------------------------------------------------------
-    GEOMETRY = "crossing_beams"   # <-- switch here
+    GEOMETRY = "half_plane_beam"   # <-- switch here
 
     if GEOMETRY == "lattice":
         grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
@@ -881,6 +890,83 @@ if __name__ == "__main__":
         c   = 1.0
         T_f = 3.5
         N_t = 10
+
+    elif GEOMETRY == "crooked_pipe":
+        # Scattering cells (sigma_s=1, sigma_a=0) at lattice indices:
+        #   13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55
+        # All others purely absorbing (sigma_a=10, sigma_s=0).
+        # Isotropic source Q=1 in cell 13 (x in [1,2], y in [3,4]).
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
+        _SCATTERING = frozenset([13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55])
+
+        def Q(x, y):
+            return 1.0 if (1.0 < x < 2.0) and (3.0 < y < 4.0) else 0.0
+
+        def sigma_a(x, y):
+            s = int(np.floor(x)) * 10 + int(np.floor(y))
+            return 0.0 if s in _SCATTERING else 10.0
+
+        def sigma_s(x, y):
+            s = int(np.floor(x)) * 10 + int(np.floor(y))
+            return 1.0 if s in _SCATTERING else 0.0
+
+        c   = 1.0
+        T_f = 3.5
+        N_t = 10
+
+    elif GEOMETRY == "half_plane_beam":
+        # Half-plane scattering problem with a delta-beam initial condition.
+        # Domain [0,7]x[0,7].  Absorbing frame (sigma_a=10) of width 0.5.
+        # Left  half (x < 3.5): sigma_a=0.02, sigma_s=0   (purely absorbing)
+        # Right half (x >= 3.5): sigma_a=0.02, sigma_s=10  (highly scattering)
+        # No volume source (Q=0).
+        # IC: psi = delta(Omega - Omega_0) in [1,2]x[1,2], Omega_0 = (1,1)/sqrt(2)
+        #   => phi_0 = 1, Jx_0 = Jy_0 = 1/sqrt(2), zero elsewhere.
+        grid = Grid(x0=0.0, x1=7.0, y0=0.0, y1=7.0, nx=70, ny=70)
+
+        def Q(x, y):
+            return 0.0
+
+        def sigma_a(x, y):
+            if x < 0.5 or x > 6.5 or y < 0.5 or y > 6.5:
+                return 10.0   # absorbing frame
+            return 0.02
+
+        def sigma_s(x, y):
+            if x < 0.5 or x > 6.5 or y < 0.5 or y > 6.5:
+                return 0.0   # absorbing frame
+            if x < 3.5:
+                return 0.0   # left half: no scattering
+            return 10.0      # right half: highly scattering
+
+        c   = 1.0
+        T_f = 7.0
+        N_t = 10
+
+        # Build IC arrays: phi=1, Jx=Jy=1/sqrt(2) in source cell [1,2]x[1,2], zero elsewhere.
+        # With px=py=0: Nloc=1, shape (ncells, 1).
+        _ncells = grid.nx * grid.ny
+        _Nloc   = 1   # px=py=0
+        # Broadened IC: uniform cone of half-angle 5 deg around Omega_0 = (1,1,0)/sqrt(2).
+        # <cos alpha> = (1 + cos(5 deg)) / 2  =>  |J|/phi = <cos alpha> < 1.
+        _theta_max = np.deg2rad(45.0)
+        _cos_mean  = (1.0 + np.cos(_theta_max)) / 2.0   # ~0.85355
+        _omega0    = 1.0 / np.sqrt(2.0)
+        _Jval      = _cos_mean * _omega0                 # Jx = Jy = cos_mean/sqrt(2)
+        phi_ic = np.zeros((_ncells, _Nloc))
+        Jx_ic  = np.zeros((_ncells, _Nloc))
+        Jy_ic  = np.zeros((_ncells, _Nloc))
+        # Identify cells whose centers lie in [1,2]x[1,2]
+        hx = grid.hx;  hy = grid.hy
+        for _iy in range(grid.ny):
+            for _ix in range(grid.nx):
+                _cx = grid.x0 + (_ix + 0.5) * hx
+                _cy = grid.y0 + (_iy + 0.5) * hy
+                if 1.0 <= _cx <= 2.0 and 1.0 <= _cy <= 2.0:
+                    _c = _iy * grid.nx + _ix
+                    phi_ic[_c, 0] = 1.0
+                    Jx_ic[_c, 0]  = _Jval
+                    Jy_ic[_c, 0]  = _Jval
 
     else:  # Hohlraum_v2: 1.5x1.5 domain, all interior features shifted +0.2x +0.1y
         grid = Grid(x0=0.0, x1=1.5, y0=0.0, y1=1.5, nx=75, ny=75)
@@ -926,6 +1012,13 @@ if __name__ == "__main__":
     dt = T_f / N_t
 
     # ------------------------------------------------------------------
+    # Build IC kwargs (only for half_plane_beam)
+    # ------------------------------------------------------------------
+    ic_kwargs = {}
+    if GEOMETRY == "half_plane_beam":
+        ic_kwargs = dict(phi_ic=phi_ic, Jx_ic=Jx_ic, Jy_ic=Jy_ic)
+
+    # ------------------------------------------------------------------
     # Run implicit-Euler time integration
     # ------------------------------------------------------------------
     snapshots = solve_m1_dg_time(
@@ -939,6 +1032,7 @@ if __name__ == "__main__":
         c=c,
         D_func=D_from_phiJ_levermore,
         verbose_steps=True,
+        **ic_kwargs,
         # --- stability knobs ---
         use_face_speed=True,
         amin_face=1e-3,

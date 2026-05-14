@@ -164,6 +164,22 @@ def sigma_crossing_beams(x: float, y: float) -> tuple[float, float]:
     return 0.02, 0.0
 
 
+def sigma_crooked_pipe(x: float, y: float) -> tuple[float, float]:
+    """
+    Returns (sigma_a, sigma_s) for the crooked-pipe geometry.
+
+    Domain [0,7]x[0,7].  Scattering cells (sigma_s=1, sigma_a=0) defined by
+    the lattice index s = floor(x)*10 + floor(y):
+      13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55
+    All other cells are purely absorbing (sigma_a=10, sigma_s=0).
+    Isotropic source Q=1 in cell 13 (x in [1,2], y in [3,4]).
+    """
+    s = int(np.floor(x)) * 10 + int(np.floor(y))
+    if s in (13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55):
+        return 0.0, 1.0
+    return 10.0, 0.0
+
+
 def assign_materials_cartesian(cell_centers: np.ndarray, geometry: str):
     """
     Evaluate material functions at cell centres.
@@ -184,6 +200,8 @@ def assign_materials_cartesian(cell_centers: np.ndarray, geometry: str):
         mat_fn = sigma_lattice
     elif geometry == "crossing_beams":
         mat_fn = sigma_crossing_beams
+    elif geometry == "crooked_pipe":
+        mat_fn = sigma_crooked_pipe
     elif geometry == "Hohlraum_v2":
         mat_fn = sigma_hohlraum_v2
     else:
@@ -229,6 +247,15 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str):
         phi   = rng.uniform(0.0, TWO_PI)
         u = np.array([sinth * np.cos(phi), sinth * np.sin(phi)], dtype=np.float64)
         w = 2.0
+    elif geometry == "crooked_pipe":
+        # Isotropic source in cell 13: x in [1,2], y in [3,4], area=1, Q=1
+        # weight = Q * A_src = 1.0
+        x = np.array([rng.uniform(1.0, 2.0), rng.uniform(3.0, 4.0)], dtype=np.float64)
+        costh = rng.uniform(-1.0, 1.0)
+        sinth = np.sqrt(1.0 - costh**2)
+        phi   = rng.uniform(0.0, TWO_PI)
+        u = np.array([sinth * np.cos(phi), sinth * np.sin(phi)], dtype=np.float64)
+        w = 1.0
     else:
         y_min, y_max = 0.0, 1.3
         x = np.array([1e-8, rng.uniform(y_min, y_max)], dtype=np.float64)
@@ -654,8 +681,9 @@ def main():
     # ------------------------------------------------------------------
     # Choose geometry
     # ------------------------------------------------------------------
-    Lattice = False
-    Crossing = True
+    Lattice  = False
+    Crossing = False
+    Crooked  = True
 
     if Lattice:
         geometry = "lattice"
@@ -663,6 +691,10 @@ def main():
         Nx, Ny   = 70, 70      # 10 cells per unit length -> 0.05 cm resolution
     elif Crossing:
         geometry = "crossing_beams"
+        Lx, Ly   = 7.0, 7.0
+        Nx, Ny   = 70, 70
+    elif Crooked:
+        geometry = "crooked_pipe"
         Lx, Ly   = 7.0, 7.0
         Nx, Ny   = 70, 70
     else:

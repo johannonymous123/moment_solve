@@ -150,6 +150,39 @@ def sigma_crossing_beams(x: float, y: float) -> tuple[float, float]:
     return 0.02, 0.0
 
 
+def sigma_half_plane_beam(x: float, y: float) -> tuple[float, float]:
+    """
+    Returns (sigma_a, sigma_s) for the half-plane-beam geometry.
+
+    Domain [0,7]x[0,7].  Absorbing frame (sigma_a=10, sigma_s=0) of width 0.5.
+    Interior:
+      Left  half (x < 3.5): sigma_a=0.02, sigma_s=0
+      Right half (x >= 3.5): sigma_a=0.02, sigma_s=10
+    No volume source; initial condition is a delta beam in [1,2]x[1,2].
+    """
+    if x < 0.5 or x > 6.5 or y < 0.5 or y > 6.5:
+        return 10.0, 0.0   # absorbing frame
+    if x < 3.5:
+        return 0.02, 0.0   # left half: purely absorbing
+    return 0.02, 10.0      # right half: highly scattering
+
+
+def sigma_crooked_pipe(x: float, y: float) -> tuple[float, float]:
+    """
+    Returns (sigma_a, sigma_s) for the crooked-pipe geometry.
+
+    Domain [0,7]x[0,7].  Scattering cells (sigma_s=1, sigma_a=0) defined by
+    the lattice index s = floor(x)*10 + floor(y):
+      13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55
+    All other cells are purely absorbing (sigma_a=10, sigma_s=0).
+    Isotropic source Q=1 in cell 13 (x in [1,2], y in [3,4]).
+    """
+    s = int(np.floor(x)) * 10 + int(np.floor(y))
+    if s in (13, 23, 31, 32, 33, 34, 35, 41, 45, 51, 52, 53, 54, 55):
+        return 0.0, 1.0
+    return 100.0, 0.0
+
+
 def assign_materials_cartesian(cell_centers: np.ndarray, geometry: str):
     Nc = cell_centers.shape[0]
     sigma_a = np.empty(Nc, dtype=np.float64)
@@ -158,6 +191,10 @@ def assign_materials_cartesian(cell_centers: np.ndarray, geometry: str):
         mat_fn = sigma_lattice
     elif geometry == "crossing_beams":
         mat_fn = sigma_crossing_beams
+    elif geometry == "crooked_pipe":
+        mat_fn = sigma_crooked_pipe
+    elif geometry == "half_plane_beam":
+        mat_fn = sigma_half_plane_beam
     elif geometry == "Hohlraum_v2":
         mat_fn = sigma_hohlraum_v2
     else:
@@ -208,6 +245,15 @@ def sample_source_particle_numpy(rng: np.random.Generator, geometry: str,
         phi_ang = rng.uniform(0.0, TWO_PI)
         u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
         w = T_f * 2.0
+    elif geometry == "crooked_pipe":
+        # Isotropic source in cell 13: x in [1,2], y in [3,4], area=1, Q=1
+        # weight = Q * A_src * T_f = T_f
+        x = np.array([rng.uniform(1.0, 2.0), rng.uniform(3.0, 4.0)], dtype=np.float64)
+        costh   = rng.uniform(-1.0, 1.0)
+        sinth   = np.sqrt(1.0 - costh**2)
+        phi_ang = rng.uniform(0.0, TWO_PI)
+        u = np.array([sinth * np.cos(phi_ang), sinth * np.sin(phi_ang)], dtype=np.float64)
+        w = T_f * 1.0
     else:
         y_min, y_max = 0.0, 1.3
         x   = np.array([1e-8, rng.uniform(y_min, y_max)], dtype=np.float64)
@@ -643,13 +689,19 @@ def main():
     # Choose geometry
     # ------------------------------------------------------------------
     
-    geometry = "crossing_beams"
+    geometry = "half_plane_beam"  # "lattice", "crossing_beams", "crooked_pipe", "half_plane_beam", "Hohlraum_v2"
     if geometry == "lattice":
         geometry = "lattice"
         Lx, Ly   = 7.0, 7.0
         Nx, Ny   = 70, 70
     elif geometry == "crossing_beams":
         geometry = "crossing_beams"
+        Lx, Ly   = 7.0, 7.0
+        Nx, Ny   = 70, 70
+    elif geometry == "crooked_pipe":
+        Lx, Ly   = 7.0, 7.0
+        Nx, Ny   = 70, 70
+    elif geometry == "half_plane_beam":
         Lx, Ly   = 7.0, 7.0
         Nx, Ny   = 70, 70
     else:
@@ -661,7 +713,7 @@ def main():
     # Time parameters
     # ------------------------------------------------------------------
     c   = 1.0       # speed of light (change units here)
-    T_f = 3.5       # final time
+    T_f = 7.0
     N_t = 10        # number of time steps
     dt  = T_f / N_t
 
@@ -681,13 +733,17 @@ def main():
     # ------------------------------------------------------------------
     # MC parameters
     # ------------------------------------------------------------------
-    Np                 = 50000
+    Np                 = 100000
     w_cut              = 1e-6 / Np
     w_survive          = 1e-2
     max_cell_crossings = 10000000   # per particle (not Np*1000 — time kills them)
 
     # ------------------------------------------------------------------
-    # Initialise particles (birth times sampled uniformly over [0, T_f])
+    # Initialise particles
+    # For "half_plane_beam": all particles represent the delta-beam IC at t=0.
+    #   Position: uniform in [1,2]x[1,2], direction fixed at Omega_0=(1,1)/sqrt(2),
+    #   birth time t=0, weight w=1.0 (cell area=1, Q_IC=1).
+    # For all other geometries: sample source particles with birth time ~ U[0, T_f].
     # ------------------------------------------------------------------
     rng       = np.random.default_rng(1234)
     init_x    = np.empty(Np, dtype=np.float64)
@@ -698,16 +754,45 @@ def main():
     init_t    = np.empty(Np, dtype=np.float64)
     init_cell = np.empty(Np, dtype=np.int64)
 
-    for i in range(Np):
-        x, u, w, t_birth = sample_source_particle_numpy(rng, geometry, T_f)
-        cell = find_initial_cell_cartesian(x, Nx, Ny, dx, dy)
-        init_cell[i] = cell
-        init_x[i]    = x[0]
-        init_y[i]    = x[1]
-        init_dx[i]   = u[0]
-        init_dy[i]   = u[1]
-        init_w[i]    = w
-        init_t[i]    = t_birth
+    if geometry == "half_plane_beam":
+        # Broadened IC: uniform cone of half-angle 5 deg around Omega_0=(1,1,0)/sqrt(2).
+        # Sample directions uniformly inside the cone using local orthonormal frame:
+        #   n_hat = (1/sqrt(2), 1/sqrt(2), 0)
+        #   e1    = (-1/sqrt(2), 1/sqrt(2), 0)   (in-plane perp to n_hat)
+        #   e2    = (0, 0, 1)                     (out-of-plane)
+        # cos(alpha) ~ Uniform[cos(5 deg), 1], phi_rot ~ Uniform[0, 2pi]
+        # Omega = cos(a)*n_hat + sin(a)*cos(phi_rot)*e1 + sin(a)*sin(phi_rot)*e2
+        # Then project to 2D: (Omega_x, Omega_y).
+        theta_max = np.deg2rad(45.0)
+        cos_max   = np.cos(theta_max)
+        n_hat     = np.array([1.0/np.sqrt(2.0),  1.0/np.sqrt(2.0), 0.0])
+        e1        = np.array([-1.0/np.sqrt(2.0), 1.0/np.sqrt(2.0), 0.0])
+        e2        = np.array([0.0, 0.0, 1.0])
+        for i in range(Np):
+            x = np.array([rng.uniform(1.0, 2.0), rng.uniform(1.0, 2.0)], dtype=np.float64)
+            cos_a   = rng.uniform(cos_max, 1.0)
+            sin_a   = np.sqrt(1.0 - cos_a**2)
+            phi_rot = rng.uniform(0.0, TWO_PI)
+            om3 = cos_a * n_hat + sin_a * np.cos(phi_rot) * e1 + sin_a * np.sin(phi_rot) * e2
+            cell = find_initial_cell_cartesian(x, Nx, Ny, dx, dy)
+            init_cell[i] = cell
+            init_x[i]    = x[0]
+            init_y[i]    = x[1]
+            init_dx[i]   = om3[0]   # 2D projection
+            init_dy[i]   = om3[1]
+            init_w[i]    = 1.0
+            init_t[i]    = 0.0
+    else:
+        for i in range(Np):
+            x, u, w, t_birth = sample_source_particle_numpy(rng, geometry, T_f)
+            cell = find_initial_cell_cartesian(x, Nx, Ny, dx, dy)
+            init_cell[i] = cell
+            init_x[i]    = x[0]
+            init_y[i]    = x[1]
+            init_dx[i]   = u[0]
+            init_dy[i]   = u[1]
+            init_w[i]    = w
+            init_t[i]    = t_birth
 
     # ------------------------------------------------------------------
     # Per-particle RNG seeds
